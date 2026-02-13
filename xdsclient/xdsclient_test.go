@@ -21,16 +21,25 @@ package xdsclient
 import (
 	"strings"
 	"testing"
+	"time"
 
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/internal/xds/clients"
-	"google.golang.org/grpc/internal/xds/clients/grpctransport"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/internal/xdsresource"
+	"github.com/sepps/xdsclient/internal/xdsresource"
 )
 
-func (s) TestXDSClient_New(t *testing.T) {
-	configs := map[string]grpctransport.Config{"insecure": {Credentials: insecure.NewBundle()}}
+var (
+	// ResourceWatchStateForTesting gets the watch state for the resource
+	// identified by the given resource type and resource name. Returns a
+	// non-nil error if there is no such resource being watched.
+	ResourceWatchStateForTesting func(*XDSClient, ResourceType, string) (xdsresource.ResourceWatchState, error)
+)
 
+var listenerType = ResourceType{
+	TypeURL: "type.googleapis.com/envoy.config.listener.v3.Listener",
+}
+
+type s struct{}
+
+func (s) TestXDSClient_New(t *testing.T) {
 	tests := []struct {
 		name    string
 		config  Config
@@ -39,14 +48,14 @@ func (s) TestXDSClient_New(t *testing.T) {
 		{
 			name: "nil resource types",
 			config: Config{
-				Node: clients.Node{ID: "node-id"},
+				Node: Node{ID: "node-id"},
 			},
 			wantErr: "resource types map is nil",
 		},
 		{
 			name: "nil transport builder",
 			config: Config{
-				Node:          clients.Node{ID: "node-id"},
+				Node:          Node{ID: "node-id"},
 				ResourceTypes: map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
 			},
 			wantErr: "transport builder is nil",
@@ -54,39 +63,39 @@ func (s) TestXDSClient_New(t *testing.T) {
 		{
 			name: "no servers or authorities",
 			config: Config{
-				Node:             clients.Node{ID: "node-id"},
+				Node:             Node{ID: "node-id"},
 				ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
-				TransportBuilder: grpctransport.NewBuilder(configs),
+				TransportBuilder: &fakeTransportBuilder{},
 			},
 			wantErr: "no servers or authorities specified",
 		},
 		{
 			name: "success with servers",
 			config: Config{
-				Node:             clients.Node{ID: "node-id"},
+				Node:             Node{ID: "node-id"},
 				ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
-				TransportBuilder: grpctransport.NewBuilder(configs),
-				Servers:          []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}},
+				TransportBuilder: &fakeTransportBuilder{},
+				Servers:          []ServerConfig{{ServerIdentifier: ServerIdentifier{ServerURI: "dummy-server"}}},
 			},
 			wantErr: "",
 		},
 		{
 			name: "success with servers and empty nodeID",
 			config: Config{
-				Node:             clients.Node{ID: ""},
+				Node:             Node{ID: ""},
 				ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
-				TransportBuilder: grpctransport.NewBuilder(configs),
-				Servers:          []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}},
+				TransportBuilder: &fakeTransportBuilder{},
+				Servers:          []ServerConfig{{ServerIdentifier: ServerIdentifier{ServerURI: "dummy-server"}}},
 			},
 			wantErr: "",
 		},
 		{
 			name: "success with authorities",
 			config: Config{
-				Node:             clients.Node{ID: "node-id"},
+				Node:             Node{ID: "node-id"},
 				ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
-				TransportBuilder: grpctransport.NewBuilder(configs),
-				Authorities:      map[string]Authority{"authority-name": {XDSServers: []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}}}},
+				TransportBuilder: &fakeTransportBuilder{},
+				Authorities:      map[string]Authority{"authority-name": {XDSServers: []ServerConfig{{ServerIdentifier: ServerIdentifier{ServerURI: "dummy-server"}}}}},
 			},
 			wantErr: "",
 		},
@@ -111,12 +120,11 @@ func (s) TestXDSClient_New(t *testing.T) {
 }
 
 func (s) TestXDSClient_Close(t *testing.T) {
-	configs := map[string]grpctransport.Config{"insecure": {Credentials: insecure.NewBundle()}}
 	config := Config{
-		Node:             clients.Node{ID: "node-id"},
+		Node:             Node{ID: "node-id"},
 		ResourceTypes:    map[string]ResourceType{xdsresource.V3ListenerURL: listenerType},
-		TransportBuilder: grpctransport.NewBuilder(configs),
-		Servers:          []ServerConfig{{ServerIdentifier: clients.ServerIdentifier{ServerURI: "dummy-server"}}},
+		TransportBuilder: &fakeTransportBuilder{},
+		Servers:          []ServerConfig{{ServerIdentifier: ServerIdentifier{ServerURI: "dummy-server"}}},
 	}
 	c, err := New(config)
 	if err != nil {

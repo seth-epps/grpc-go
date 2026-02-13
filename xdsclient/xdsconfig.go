@@ -20,8 +20,6 @@ package xdsclient
 
 import (
 	"time"
-
-	"google.golang.org/grpc/internal/xds/clients"
 )
 
 // ServerFeature indicates the features that will be supported by an xDS server.
@@ -59,10 +57,10 @@ type Config struct {
 
 	// Node is the identity of the xDS client connecting to the xDS
 	// management server.
-	Node clients.Node
+	Node Node
 
 	// TransportBuilder is used to create connections to xDS management servers.
-	TransportBuilder clients.TransportBuilder
+	TransportBuilder TransportBuilder
 
 	// ResourceTypes is a map from resource type URLs to resource type
 	// implementations. Each resource type URL uniquely identifies a specific
@@ -75,7 +73,7 @@ type Config struct {
 
 	// MetricsReporter is used to report registered metrics. If unset, no
 	// metrics will be reported.
-	MetricsReporter clients.MetricsReporter
+	MetricsReporter MetricsReporter
 
 	// WatchExpiryTimeout is the duration after which a resource watch expires
 	// if the requested resource is not received from the management server.
@@ -83,11 +81,15 @@ type Config struct {
 	// seconds is used as specified here:
 	// envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol#knowing-when-a-requested-resource-does-not-exist
 	WatchExpiryTimeout time.Duration
+
+	// Logger is the logger for the xDS client. If unset, a no-op logger
+	// will be used.
+	Logger Logger
 }
 
 // ServerConfig contains configuration for an xDS management server.
 type ServerConfig struct {
-	ServerIdentifier clients.ServerIdentifier
+	ServerIdentifier ServerIdentifier
 	ServerFeature    ServerFeature // ServerFeature stores a bitmap of supported features.
 }
 

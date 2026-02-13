@@ -38,14 +38,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc/internal/grpclog"
-	"google.golang.org/grpc/internal/xds/clients"
-	clientsinternal "google.golang.org/grpc/internal/xds/clients/internal"
-	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
-	"google.golang.org/grpc/internal/xds/clients/internal/syncutil"
-	xdsclientinternal "google.golang.org/grpc/internal/xds/clients/xdsclient/internal"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/internal/xdsresource"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/metrics"
+	"github.com/sepps/xdsclient/internal"
+	"github.com/sepps/xdsclient/internal/backoff"
+	"github.com/sepps/xdsclient/internal/syncutil"
+	"github.com/sepps/xdsclient/internal/xdsresource"
+	"github.com/sepps/xdsclient/metrics"
 	"google.golang.org/protobuf/proto"
 
 	v3statuspb "github.com/envoyproxy/go-control-plane/envoy/service/status/v3"
@@ -61,8 +58,7 @@ var (
 )
 
 func init() {
-	xdsclientinternal.StreamBackoff = defaultExponentialBackoff
-	xdsclientinternal.ResourceWatchStateForTesting = resourceWatchStateForTesting
+	internal.StreamBackoff = defaultExponentialBackoff
 }
 
 // XDSClient is a client which queries a set of discovery APIs (collectively
@@ -77,13 +73,13 @@ type XDSClient struct {
 	config             *Config                      // Complete xDS client configuration.
 	watchExpiryTimeout time.Duration                // Expiry timeout for ADS watch.
 	backoff            func(int) time.Duration      // Backoff for ADS and LRS stream failures.
-	transportBuilder   clients.TransportBuilder     // Builder to create transports to xDS server.
+	transportBuilder   TransportBuilder             // Builder to create transports to xDS server.
 	resourceTypes      map[string]ResourceType      // Registry of resource types, for parsing incoming ADS responses.
 	serializer         *syncutil.CallbackSerializer // Serializer for invoking resource watcher callbacks.
 	serializerClose    func()                       // Function to close the serializer.
-	logger             *grpclog.PrefixLogger
+	logger             Logger
 	target             string
-	metricsReporter    clients.MetricsReporter
+	metricsReporter    MetricsReporter
 
 	// The XDSClient owns a bunch of channels to individual xDS servers
 	// specified in the xDS client configuration. Authorities acquire references
@@ -120,19 +116,24 @@ func New(config Config) (*XDSClient, error) {
 // newClient returns a new XDSClient with the given config.
 func newClient(config *Config, target string) (*XDSClient, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	logger := config.Logger
+	if logger == nil {
+		logger = noopLogger{}
+	}
 	c := &XDSClient{
 		target:             target,
 		done:               syncutil.NewEvent(),
 		authorities:        make(map[string]*authority),
 		config:             config,
 		watchExpiryTimeout: config.WatchExpiryTimeout,
-		backoff:            xdsclientinternal.StreamBackoff,
+		backoff:            internal.StreamBackoff,
 		serializer:         syncutil.NewCallbackSerializer(ctx),
 		serializerClose:    cancel,
 		transportBuilder:   config.TransportBuilder,
 		resourceTypes:      config.ResourceTypes,
 		xdsActiveChannels:  make(map[ServerConfig]*channelState),
 		metricsReporter:    config.MetricsReporter,
+		logger:             logger,
 	}
 
 	for name, cfg := range config.Authorities {
@@ -147,7 +148,7 @@ func newClient(config *Config, target string) (*XDSClient, error) {
 			name:             name,
 			serializer:       c.serializer,
 			getChannelForADS: c.getChannelForADS,
-			logPrefix:        clientPrefix(c),
+			logger:           c.logger,
 			target:           target,
 			metricsReporter:  c.metricsReporter,
 		})
@@ -157,11 +158,10 @@ func newClient(config *Config, target string) (*XDSClient, error) {
 		name:             "",
 		serializer:       c.serializer,
 		getChannelForADS: c.getChannelForADS,
-		logPrefix:        clientPrefix(c),
+		logger:           c.logger,
 		target:           target,
 		metricsReporter:  c.metricsReporter,
 	})
-	c.logger = prefixLogger(c)
 
 	return c, nil
 }
@@ -276,7 +276,7 @@ func (c *XDSClient) getOrCreateChannel(serverConfig *ServerConfig, initLocked, d
 
 	// Create a new transport and create a new xdsChannel, and add it to the
 	// map of xdsChannels.
-	tr, err := c.transportBuilder.Build(serverConfig.ServerIdentifier)
+	tr, err := c.transportBuilder.Build(serverConfig.ServerIdentifier.ServerURI)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("xds: failed to create transport for server config %v: %v", serverConfig, err)
 	}
@@ -292,7 +292,7 @@ func (c *XDSClient) getOrCreateChannel(serverConfig *ServerConfig, initLocked, d
 		eventHandler:       state,
 		backoff:            c.backoff,
 		watchExpiryTimeout: c.watchExpiryTimeout,
-		logPrefix:          clientPrefix(c),
+		logger:             c.logger,
 	})
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("xds: failed to create a new channel for server config %v: %v", serverConfig, err)
@@ -351,7 +351,7 @@ func (c *XDSClient) DumpResources() ([]byte, error) {
 		retCfg = append(retCfg, a.dumpResources()...)
 	}
 
-	nodeProto := clientsinternal.NodeProto(c.config.Node)
+	nodeProto := nodeProto(c.config.Node)
 	nodeProto.ClientFeatures = []string{clientFeatureNoOverprovisioning, clientFeatureResourceWrapper}
 	resp := &v3statuspb.ClientStatusResponse{}
 	resp.Config = append(resp.Config, &v3statuspb.ClientConfig{
@@ -440,4 +440,11 @@ func resourceWatchStateForTesting(c *XDSClient, rType ResourceType, resourceName
 	}
 	return a.resourceWatchStateForTesting(rType, resourceName)
 
+}
+
+func (c *XDSClient) getAuthorityForResource(name *xdsresource.Name) *authority {
+	if name.Authority == "" {
+		return c.topLevelAuthority
+	}
+	return c.authorities[name.Authority]
 }

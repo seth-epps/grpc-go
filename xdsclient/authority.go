@@ -25,12 +25,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"google.golang.org/grpc/grpclog"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
-	"google.golang.org/grpc/internal/xds/clients"
-	"google.golang.org/grpc/internal/xds/clients/internal/syncutil"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/internal/xdsresource"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/metrics"
+	"github.com/sepps/xdsclient/internal/syncutil"
+	"github.com/sepps/xdsclient/internal/xdsresource"
+	"github.com/sepps/xdsclient/metrics"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -88,9 +85,9 @@ type authority struct {
 	getChannelForADS          xdsChannelForADS             // Function to get an xdsChannel for ADS, provided by the xDS client implementation.
 	xdsClientSerializer       *syncutil.CallbackSerializer // Serializer to run call ins from the xDS client, owned by this authority.
 	xdsClientSerializerClose  func()                       // Function to close the above serializer.
-	logger                    *igrpclog.PrefixLogger       // Logger for this authority.
+	logger                    Logger                       // Logger for this authority.
 	target                    string                       // The gRPC Channel target.
-	metricsReporter           clients.MetricsReporter
+	metricsReporter           MetricsReporter
 
 	// The below defined fields must only be accessed in the context of the
 	// serializer callback, owned by this authority.
@@ -123,9 +120,9 @@ type authorityBuildOptions struct {
 	name             string                       // Name of the authority
 	serializer       *syncutil.CallbackSerializer // Callback serializer for invoking watch callbacks
 	getChannelForADS xdsChannelForADS             // Function to acquire a reference to an xdsChannel
-	logPrefix        string                       // Prefix for logging
+	logger           Logger                       // Logger for the authority
 	target           string                       // Target for the gRPC Channel that owns xDS Client/Authority
-	metricsReporter  clients.MetricsReporter      // Metrics reporter for the authority
+	metricsReporter  MetricsReporter      // Metrics reporter for the authority
 }
 
 // newAuthority creates a new authority instance with the provided
@@ -139,15 +136,13 @@ type authorityBuildOptions struct {
 // is registered, and more channels are created as needed by the fallback logic.
 func newAuthority(args authorityBuildOptions) *authority {
 	ctx, cancel := context.WithCancel(context.Background())
-	l := grpclog.Component("xds")
-	logPrefix := args.logPrefix + fmt.Sprintf("[authority %q] ", args.name)
 	ret := &authority{
 		name:                      args.name,
 		watcherCallbackSerializer: args.serializer,
 		getChannelForADS:          args.getChannelForADS,
 		xdsClientSerializer:       syncutil.NewCallbackSerializer(ctx),
 		xdsClientSerializerClose:  cancel,
-		logger:                    igrpclog.NewPrefixLogger(l, logPrefix),
+		logger:                    args.logger,
 		resources:                 make(map[ResourceType]map[string]*resourceState),
 		target:                    args.target,
 		metricsReporter:           args.metricsReporter,

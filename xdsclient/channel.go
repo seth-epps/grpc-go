@@ -24,13 +24,9 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/grpc/grpclog"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
-	"google.golang.org/grpc/internal/xds/clients"
-	"google.golang.org/grpc/internal/xds/clients/internal"
-	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
-	"google.golang.org/grpc/internal/xds/clients/internal/syncutil"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/internal/xdsresource"
+	"github.com/sepps/xdsclient/internal/backoff"
+	"github.com/sepps/xdsclient/internal/syncutil"
+	"github.com/sepps/xdsclient/internal/xdsresource"
 )
 
 const (
@@ -63,13 +59,13 @@ type xdsChannelEventHandler interface {
 
 // xdsChannelOpts holds the options for creating a new xdsChannel.
 type xdsChannelOpts struct {
-	transport          clients.Transport       // Takes ownership of this transport.
+	transport          Transport               // Takes ownership of this transport.
 	serverConfig       *ServerConfig           // Configuration of the server to connect to.
 	clientConfig       *Config                 // Complete xDS client configuration, used to decode resources.
 	eventHandler       xdsChannelEventHandler  // Callbacks for ADS stream events.
 	backoff            func(int) time.Duration // Backoff function to use for stream retries. Defaults to exponential backoff, if unset.
 	watchExpiryTimeout time.Duration           // Timeout for ADS resource watch expiry.
-	logPrefix          string                  // Prefix to use for logging.
+	logger             Logger                  // Logger for the xds channel.
 }
 
 // newXDSChannel creates a new xdsChannel instance with the provided options.
@@ -92,17 +88,14 @@ func newXDSChannel(opts xdsChannelOpts) (*xdsChannel, error) {
 		serverConfig: opts.serverConfig,
 		clientConfig: opts.clientConfig,
 		eventHandler: opts.eventHandler,
+		logger:       opts.logger,
 		closed:       syncutil.NewEvent(),
 	}
-
-	l := grpclog.Component("xds")
-	logPrefix := opts.logPrefix + fmt.Sprintf("[xds-channel %p] ", xc)
-	xc.logger = igrpclog.NewPrefixLogger(l, logPrefix)
 
 	if opts.backoff == nil {
 		opts.backoff = backoff.DefaultExponential.Backoff
 	}
-	np := internal.NodeProto(opts.clientConfig.Node)
+	np := nodeProto(opts.clientConfig.Node)
 	np.ClientFeatures = []string{clientFeatureNoOverprovisioning, clientFeatureResourceWrapper}
 	xc.ads = newADSStreamImpl(adsStreamOpts{
 		transport:          opts.transport,
@@ -110,7 +103,7 @@ func newXDSChannel(opts xdsChannelOpts) (*xdsChannel, error) {
 		backoff:            opts.backoff,
 		nodeProto:          np,
 		watchExpiryTimeout: opts.watchExpiryTimeout,
-		logPrefix:          logPrefix,
+		logger:             opts.logger,
 	})
 	if xc.logger.V(2) {
 		xc.logger.Infof("xdsChannel is created for ServerConfig %v", opts.serverConfig)
@@ -126,12 +119,12 @@ func newXDSChannel(opts xdsChannelOpts) (*xdsChannel, error) {
 type xdsChannel struct {
 	// The following fields are initialized at creation time and are read-only
 	// after that, and hence need not be guarded by a mutex.
-	transport    clients.Transport      // Takes ownership of this transport (used to make streaming calls).
+	transport    Transport              // Takes ownership of this transport (used to make streaming calls).
 	ads          *adsStreamImpl         // An ADS stream to the management server.
 	serverConfig *ServerConfig          // Configuration of the server to connect to.
 	clientConfig *Config                // Complete xDS client configuration, used to decode resources.
 	eventHandler xdsChannelEventHandler // Callbacks for ADS stream events.
-	logger       *igrpclog.PrefixLogger // Logger to use for logging.
+	logger       Logger                 // Logger to use for logging.
 	closed       *syncutil.Event        // Fired when the channel is closed.
 }
 

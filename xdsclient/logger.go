@@ -1,6 +1,6 @@
 /*
  *
- * Copyright 2025 gRPC authors.
+ * Copyright 2026 gRPC authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,19 +18,18 @@
 
 package xdsclient
 
-import (
-	"fmt"
-
-	"google.golang.org/grpc/grpclog"
-	internalgrpclog "google.golang.org/grpc/internal/grpclog"
-)
-
-var logger = grpclog.Component("xds")
-
-func prefixLogger(p *XDSClient) *internalgrpclog.PrefixLogger {
-	return internalgrpclog.NewPrefixLogger(logger, clientPrefix(p))
+// Logger is the interface for logging.
+type Logger interface {
+	Infof(format string, args ...interface{})
+	Warningf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+	V(l int) bool
 }
 
-func clientPrefix(p *XDSClient) string {
-	return fmt.Sprintf("[xds-client %p] ", p)
-}
+// noopLogger is a logger that does nothing.
+type noopLogger struct{}
+
+func (noopLogger) Infof(format string, args ...interface{})    {}
+func (noopLogger) Warningf(format string, args ...interface{}) {}
+func (noopLogger) Errorf(format string, args ...interface{})   {}
+func (noopLogger) V(l int) bool                                { return false }

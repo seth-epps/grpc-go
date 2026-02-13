@@ -24,13 +24,9 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/grpclog"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
-	"google.golang.org/grpc/internal/xds/clients"
-	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
-	"google.golang.org/grpc/internal/xds/clients/internal/pretty"
-	"google.golang.org/grpc/internal/xds/clients/xdsclient/internal/xdsresource"
-
+	"github.com/sepps/xdsclient/internal/backoff"
+	"github.com/sepps/xdsclient/internal/pretty"
+	"github.com/sepps/xdsclient/internal/xdsresource"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -93,16 +89,16 @@ type adsStreamImpl struct {
 	// The following fields are initialized from arguments passed to the
 	// constructor and are read-only afterwards, and hence can be accessed
 	// without a mutex.
-	transport          clients.Transport       // Transport to use for ADS stream.
+	transport          Transport               // Transport to use for ADS stream.
 	eventHandler       adsStreamEventHandler   // Callbacks into the xdsChannel.
 	backoff            func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto          *v3corepb.Node          // Identifies the gRPC application.
 	watchExpiryTimeout time.Duration           // Resource watch expiry timeout
-	logger             *igrpclog.PrefixLogger
+	logger             Logger
 
 	// The following fields are initialized in the constructor and are not
 	// written to afterwards, and hence can be accessed without a mutex.
-	streamCh     chan clients.Stream // New ADS streams are pushed here.
+	streamCh     chan Stream // New ADS streams are pushed here.
 	runnerDoneCh chan struct{}       // Notify completion of runner goroutine.
 	cancel       context.CancelFunc  // To cancel the context passed to the runner goroutine.
 	fc           *adsFlowControl     // Flow control for ADS stream.
@@ -117,12 +113,12 @@ type adsStreamImpl struct {
 
 // adsStreamOpts contains the options for creating a new ADS Stream.
 type adsStreamOpts struct {
-	transport          clients.Transport       // xDS transport to create the stream on.
+	transport          Transport               // xDS transport to create the stream on.
 	eventHandler       adsStreamEventHandler   // Callbacks for stream events.
 	backoff            func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto          *v3corepb.Node          // Node proto to identify the gRPC application.
 	watchExpiryTimeout time.Duration           // Resource watch expiry timeout.
-	logPrefix          string                  // Prefix to be used for log messages.
+	logger             Logger                  // Logger for the ads stream.
 }
 
 // newADSStreamImpl initializes a new adsStreamImpl instance using the given
@@ -135,16 +131,14 @@ func newADSStreamImpl(opts adsStreamOpts) *adsStreamImpl {
 		backoff:            opts.backoff,
 		nodeProto:          opts.nodeProto,
 		watchExpiryTimeout: opts.watchExpiryTimeout,
+		logger:             opts.logger,
 
-		streamCh:          make(chan clients.Stream, 1),
+		streamCh:          make(chan Stream, 1),
 		runnerDoneCh:      make(chan struct{}),
 		fc:                newADSFlowControl(),
 		notifySender:      make(chan struct{}, 1),
 		resourceTypeState: make(map[ResourceType]*resourceTypeState),
 	}
-
-	l := grpclog.Component("xds")
-	s.logger = igrpclog.NewPrefixLogger(l, opts.logPrefix+fmt.Sprintf("[ads-stream %p] ", s))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -276,7 +270,7 @@ func (s *adsStreamImpl) runner(ctx context.Context) {
 // - a new stream is created after the previous one failed
 func (s *adsStreamImpl) send(ctx context.Context) {
 	// Stores the most recent stream instance received on streamCh.
-	var stream clients.Stream
+	var stream Stream
 	for {
 		select {
 		case <-ctx.Done():
@@ -317,7 +311,7 @@ func (s *adsStreamImpl) send(ctx context.Context) {
 // `watchStateStarted`.
 //
 // Caller needs to hold c.mu.
-func (s *adsStreamImpl) sendNewLocked(stream clients.Stream, requests []request) error {
+func (s *adsStreamImpl) sendNewLocked(stream Stream, requests []request) error {
 	for _, req := range requests {
 		state := s.resourceTypeState[req.typ]
 		if err := s.sendMessageLocked(stream, req.resourceNames, req.typ.TypeURL, state.version, state.nonce, nil); err != nil {
@@ -332,7 +326,7 @@ func (s *adsStreamImpl) sendNewLocked(stream clients.Stream, requests []request)
 // recovering from a broken stream.
 //
 // The stream argument is guaranteed to be non-nil.
-func (s *adsStreamImpl) sendExisting(stream clients.Stream) error {
+func (s *adsStreamImpl) sendExisting(stream Stream) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -372,7 +366,7 @@ func (s *adsStreamImpl) sendExisting(stream clients.Stream) error {
 // error if the request could not be sent.
 //
 // Caller needs to hold c.mu.
-func (s *adsStreamImpl) sendMessageLocked(stream clients.Stream, names []string, url, version, nonce string, nackErr error) error {
+func (s *adsStreamImpl) sendMessageLocked(stream Stream, names []string, url, version, nonce string, nackErr error) error {
 	req := &v3discoverypb.DiscoveryRequest{
 		ResourceNames: names,
 		TypeUrl:       url,
@@ -424,7 +418,7 @@ func (s *adsStreamImpl) sendMessageLocked(stream clients.Stream, names []string,
 //
 // It returns a boolean indicating whether at least one message was received
 // from the server.
-func (s *adsStreamImpl) recv(stream clients.Stream) bool {
+func (s *adsStreamImpl) recv(stream Stream) bool {
 	msgReceived := false
 	for {
 		// Wait for ADS stream level flow control to be available.
@@ -472,7 +466,7 @@ func (s *adsStreamImpl) recv(stream clients.Stream) bool {
 	}
 }
 
-func (s *adsStreamImpl) recvMessage(stream clients.Stream) (resources []*anypb.Any, url, version, nonce string, err error) {
+func (s *adsStreamImpl) recvMessage(stream Stream) (resources []*anypb.Any, url, version, nonce string, err error) {
 	r, err := stream.Recv()
 	if err != nil {
 		return nil, "", "", "", err
@@ -497,7 +491,7 @@ func (s *adsStreamImpl) recvMessage(stream clients.Stream) (resources []*anypb.A
 //   - updates resource type specific state
 //   - updates resource specific state for resources in the response
 //   - sends an ACK or NACK to the server based on the response
-func (s *adsStreamImpl) onRecv(stream clients.Stream, names []string, url, version, nonce string, nackErr error) {
+func (s *adsStreamImpl) onRecv(stream Stream, names []string, url, version, nonce string, nackErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
