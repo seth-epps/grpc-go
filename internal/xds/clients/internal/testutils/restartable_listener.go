@@ -19,13 +19,12 @@
 package testutils
 
 import (
+	"log/slog"
 	"net"
 	"sync"
-
-	"google.golang.org/grpc/grpclog"
 )
 
-var logger = grpclog.Component("testutils")
+var logger = slog.Default().With("component", "testutils")
 
 type tempError struct{}
 
@@ -85,7 +84,7 @@ func (l *RestartableListener) Addr() net.Addr {
 // Stop closes existing connections on the listener and prevents new connections
 // from being accepted.
 func (l *RestartableListener) Stop() {
-	logger.Infof("Stopping restartable listener %q", l.Addr())
+	logger.Debug("Stopping restartable listener", "address", l.Addr())
 
 	l.mu.Lock()
 	l.stopped = true
@@ -98,7 +97,7 @@ func (l *RestartableListener) Stop() {
 
 // Restart gets a previously stopped listener to start accepting connections.
 func (l *RestartableListener) Restart() {
-	logger.Infof("Restarting listener %q", l.Addr())
+	logger.Debug("Restarting listener", "address", l.Addr())
 
 	l.mu.Lock()
 	l.stopped = false

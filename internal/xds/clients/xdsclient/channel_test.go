@@ -21,6 +21,7 @@ package xdsclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -79,6 +80,7 @@ func xdsChannelForTest(t *testing.T, serverURI, nodeID string, watchExpiryTimeou
 		clientConfig:       &clientConfig,
 		eventHandler:       newTestEventHandler(),
 		watchExpiryTimeout: watchExpiryTimeout,
+		logger:             slog.Default(),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create xdsChannel: %v", err)

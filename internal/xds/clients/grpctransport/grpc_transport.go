@@ -23,18 +23,18 @@ package grpctransport
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal/xds/clients"
 	"google.golang.org/grpc/keepalive"
 )
 
 var (
-	logger = grpclog.Component("grpctransport")
+	logger = slog.Default().With("component", "grpctransport")
 )
 
 // ServerIdentifierExtension holds settings for connecting to a gRPC server,
@@ -110,9 +110,7 @@ func (b *Builder) Build(si clients.ServerIdentifier) (clients.Transport, error) 
 	defer b.mu.Unlock()
 
 	if cc, ok := b.connections[si]; ok {
-		if logger.V(2) {
-			logger.Infof("Reusing existing connection to the server for ServerIdentifier: %v", si)
-		}
+		logger.Debug("Reusing existing connection to the server", "ServerIdentifier", si)
 		b.refs[si]++
 		tr := &grpcTransport{cc: cc}
 		tr.cleanup = b.cleanupFunc(si, tr)
@@ -147,9 +145,7 @@ func (b *Builder) Build(si clients.ServerIdentifier) (clients.Transport, error) 
 	b.connections[si] = cc
 	b.refs[si] = 1
 
-	if logger.V(2) {
-		logger.Infof("Created a new transport to the server for ServerIdentifier: %v", si)
-	}
+	logger.Debug("Created a new transport to the server", "ServerIdentifier", si)
 	return tr, nil
 }
 

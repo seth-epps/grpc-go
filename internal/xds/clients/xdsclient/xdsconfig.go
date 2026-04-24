@@ -19,6 +19,7 @@
 package xdsclient
 
 import (
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc/internal/xds/clients"
@@ -72,6 +73,10 @@ type Config struct {
 	//
 	// For example: "type.googleapis.com/envoy.config.listener.v3.Listener"
 	ResourceTypes map[string]ResourceType
+
+	// Logger is the logger used by the xDS client and its sub-components.
+	// If nil, the xDS client will use the slog Default logger.
+	Logger *slog.Logger
 
 	// MetricsReporter is used to report registered metrics. If unset, no
 	// metrics will be reported.

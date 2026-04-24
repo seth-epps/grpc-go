@@ -21,11 +21,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal/backoff"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/pretty"
 	"google.golang.org/grpc/internal/xds/clients"
 	"google.golang.org/protobuf/proto"
@@ -35,11 +34,6 @@ import (
 	v3endpointpb "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	v3lrspb "github.com/envoyproxy/go-control-plane/envoy/service/load_stats/v3"
 )
-
-// Any per-RPC level logs which print complete request or response messages
-// should be gated at this verbosity level. Other per-RPC level logs which print
-// terse output should be at `INFO` and verbosity 2.
-const perRPCVerbosityLevel = 9
 
 // streamImpl provides all the functionality associated with an LRS (Load
 // Reporting Service) stream on the client-side. It manages the lifecycle of
@@ -54,7 +48,7 @@ type streamImpl struct {
 	backoff   func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto *v3corepb.Node          // Identifies the gRPC application.
 	doneCh    chan struct{}           // To notify exit of LRS goroutine.
-	logger    *igrpclog.PrefixLogger
+	logger    *slog.Logger
 
 	cancelStream context.CancelFunc // Cancel the stream. If nil, the stream is not active.
 	loadStore    *LoadStore         // LoadStore returned to user for pushing loads.
@@ -68,7 +62,7 @@ type streamOpts struct {
 	transport clients.Transport       // xDS transport to create the stream on.
 	backoff   func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto *v3corepb.Node          // Node proto to identify the gRPC application.
-	logPrefix string                  // Prefix to be used for log messages.
+	logger    *slog.Logger            // Logger to use for logging.
 }
 
 // newStreamImpl creates a new StreamImpl with the provided options.
@@ -88,8 +82,10 @@ func newStreamImpl(opts streamOpts) *streamImpl {
 		finalSendDone:    make(chan error, 1),
 	}
 
-	l := grpclog.Component("xds")
-	lrs.logger = igrpclog.NewPrefixLogger(l, opts.logPrefix+fmt.Sprintf("[lrs-stream %p] ", lrs))
+	if opts.logger == nil {
+		opts.logger = slog.Default()
+	}
+	lrs.logger = opts.logger.With("lrs-stream", fmt.Sprintf("%p", lrs))
 	lrs.loadStore = newLoadStore()
 	go lrs.runner(ctx)
 	return lrs
@@ -117,21 +113,19 @@ func (lrs *streamImpl) runner(ctx context.Context) {
 
 		stream, err := lrs.transport.NewStream(streamCtx, "/envoy.service.load_stats.v3.LoadReportingService/StreamLoadStats")
 		if err != nil {
-			lrs.logger.Warningf("Failed to create new LRS streaming RPC: %v", err)
+			lrs.logger.Warn("Failed to create new LRS streaming RPC", "error", err)
 			return nil
 		}
-		if lrs.logger.V(2) {
-			lrs.logger.Infof("LRS stream created")
-		}
+		lrs.logger.Debug("LRS stream created")
 
 		if err := lrs.sendFirstLoadStatsRequest(stream, node); err != nil {
-			lrs.logger.Warningf("Sending first LRS request failed: %v", err)
+			lrs.logger.Warn("Sending first LRS request failed", "error", err)
 			return nil
 		}
 
 		clusters, interval, err := lrs.recvFirstLoadStatsResponse(stream)
 		if err != nil {
-			lrs.logger.Warningf("Reading from LRS streaming RPC failed: %v", err)
+			lrs.logger.Warn("Reading from LRS streaming RPC failed", "error", err)
 			return nil
 		}
 
@@ -156,22 +150,18 @@ func (lrs *streamImpl) sendLoads(ctx context.Context, stream clients.Stream, clu
 			return
 		case <-lrs.finalSendRequest:
 			var finalSendErr error
-			if lrs.logger.V(2) {
-				lrs.logger.Infof("Final send request received. Attempting final LRS report.")
-			}
+			lrs.logger.Debug("Final send request received. Attempting final LRS report.")
 			if err := lrs.sendLoadStatsRequest(stream, lrs.loadStore.stats(clusterNames)); err != nil {
-				lrs.logger.Warningf("Failed to send final load report. Writing to LRS stream failed: %v", err)
+				lrs.logger.Warn("Failed to send final load report. Writing to LRS stream failed", "error", err)
 				finalSendErr = err
 			}
-			if lrs.logger.V(2) {
-				lrs.logger.Infof("Successfully sent final load report.")
-			}
+			lrs.logger.Debug("Successfully sent final load report.")
 			lrs.finalSendDone <- finalSendErr
 			return
 		}
 
 		if err := lrs.sendLoadStatsRequest(stream, lrs.loadStore.stats(clusterNames)); err != nil {
-			lrs.logger.Warningf("Failed to send periodic load report. Writing to LRS stream failed: %v", err)
+			lrs.logger.Warn("Failed to send periodic load report. Writing to LRS stream failed", "error", err)
 			return
 		}
 	}
@@ -179,12 +169,10 @@ func (lrs *streamImpl) sendLoads(ctx context.Context, stream clients.Stream, clu
 
 func (lrs *streamImpl) sendFirstLoadStatsRequest(stream clients.Stream, node *v3corepb.Node) error {
 	req := &v3lrspb.LoadStatsRequest{Node: node}
-	if lrs.logger.V(perRPCVerbosityLevel) {
-		lrs.logger.Infof("Sending initial LoadStatsRequest: %s", pretty.ToJSON(req))
-	}
+	lrs.logger.Debug("Sending initial LoadStatsRequest", "raw", pretty.ToJSON(req))
 	msg, err := proto.Marshal(req)
 	if err != nil {
-		lrs.logger.Warningf("Failed to marshal LoadStatsRequest: %v", err)
+		lrs.logger.Warn("Failed to marshal LoadStatsRequest", "error", err)
 		return err
 	}
 	err = stream.Send(msg)
@@ -207,14 +195,10 @@ func (lrs *streamImpl) recvFirstLoadStatsResponse(stream clients.Stream) ([]stri
 	}
 	var resp v3lrspb.LoadStatsResponse
 	if err := proto.Unmarshal(r, &resp); err != nil {
-		if lrs.logger.V(2) {
-			lrs.logger.Infof("Failed to unmarshal response to LoadStatsResponse: %v", err)
-		}
+		lrs.logger.Debug("Failed to unmarshal response to LoadStatsResponse", "error", err)
 		return nil, time.Duration(0), fmt.Errorf("lrs: unexpected message type %T", r)
 	}
-	if lrs.logger.V(perRPCVerbosityLevel) {
-		lrs.logger.Infof("Received first LoadStatsResponse: %s", pretty.ToJSON(&resp))
-	}
+	lrs.logger.Debug("Received first LoadStatsResponse", "raw", pretty.ToJSON(&resp))
 
 	internal := resp.GetLoadReportingInterval()
 	if internal.CheckValid() != nil {
@@ -277,14 +261,10 @@ func (lrs *streamImpl) sendLoadStatsRequest(stream clients.Stream, loads []*load
 	}
 
 	req := &v3lrspb.LoadStatsRequest{ClusterStats: clusterStats}
-	if lrs.logger.V(perRPCVerbosityLevel) {
-		lrs.logger.Infof("Sending LRS loads: %s", pretty.ToJSON(req))
-	}
+	lrs.logger.Debug("Sending LRS loads", "raw", pretty.ToJSON(req))
 	msg, err := proto.Marshal(req)
 	if err != nil {
-		if lrs.logger.V(2) {
-			lrs.logger.Infof("Failed to marshal LoadStatsRequest: %v", err)
-		}
+		lrs.logger.Debug("Failed to marshal LoadStatsRequest", "error", err)
 		return err
 	}
 	err = stream.Send(msg)

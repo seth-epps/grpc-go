@@ -21,7 +21,9 @@
 package grpclog
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 
 	"google.golang.org/grpc/grpclog"
 )
@@ -76,4 +78,66 @@ func (pl *PrefixLogger) V(l int) bool {
 // NewPrefixLogger creates a prefix logger with the given prefix.
 func NewPrefixLogger(logger grpclog.DepthLoggerV2, prefix string) *PrefixLogger {
 	return &PrefixLogger{logger: logger, prefix: prefix}
+}
+
+// SlogLogger returns an slog.Logger that wraps the PrefixLogger.
+func (pl *PrefixLogger) SlogLogger() *slog.Logger {
+	return slog.New(&slogHandler{pl: pl})
+}
+
+type slogHandler struct {
+	pl *PrefixLogger
+}
+
+func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	if h.pl == nil {
+		return true
+	}
+	if level < slog.LevelInfo {
+		return h.pl.V(2)
+	}
+	return true
+}
+
+func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
+	msg := r.Message
+	if r.NumAttrs() > 0 {
+		var attrs []string
+		r.Attrs(func(a slog.Attr) bool {
+			attrs = append(attrs, fmt.Sprintf("%s=%v", a.Key, a.Value))
+			return true
+		})
+		msg = fmt.Sprintf("%s %v", msg, attrs)
+	}
+
+	if h.pl == nil {
+		switch {
+		case r.Level >= slog.LevelError:
+			grpclog.ErrorDepth(2, msg)
+		case r.Level >= slog.LevelWarn:
+			grpclog.WarningDepth(2, msg)
+		default:
+			grpclog.InfoDepth(2, msg)
+		}
+		return nil
+	}
+
+	prefix := h.pl.prefix
+	switch {
+	case r.Level >= slog.LevelError:
+		h.pl.logger.ErrorDepth(2, prefix+msg)
+	case r.Level >= slog.LevelWarn:
+		h.pl.logger.WarningDepth(2, prefix+msg)
+	default:
+		h.pl.logger.InfoDepth(2, prefix+msg)
+	}
+	return nil
+}
+
+func (h *slogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *slogHandler) WithGroup(name string) slog.Handler {
+	return h
 }

@@ -21,11 +21,9 @@ package xdsclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
-
-	"google.golang.org/grpc/grpclog"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/xds/clients"
 	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
 	"google.golang.org/grpc/internal/xds/clients/internal/pretty"
@@ -38,13 +36,6 @@ import (
 	v3discoverypb "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	cpb "google.golang.org/genproto/googleapis/rpc/code"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
-)
-
-const (
-	// Any per-RPC level logs which print complete request or response messages
-	// should be gated at this verbosity level. Other per-RPC level logs which print
-	// terse output should be at `INFO` and verbosity 2.
-	perRPCVerbosityLevel = 9
 )
 
 // request represents a queued request message to be sent on the ADS stream. It
@@ -98,7 +89,7 @@ type adsStreamImpl struct {
 	backoff            func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto          *v3corepb.Node          // Identifies the gRPC application.
 	watchExpiryTimeout time.Duration           // Resource watch expiry timeout
-	logger             *igrpclog.PrefixLogger
+	logger             *slog.Logger
 
 	// The following fields are initialized in the constructor and are not
 	// written to afterwards, and hence can be accessed without a mutex.
@@ -122,7 +113,7 @@ type adsStreamOpts struct {
 	backoff            func(int) time.Duration // Backoff for retries, after stream failures.
 	nodeProto          *v3corepb.Node          // Node proto to identify the gRPC application.
 	watchExpiryTimeout time.Duration           // Resource watch expiry timeout.
-	logPrefix          string                  // Prefix to be used for log messages.
+	logger             *slog.Logger            // Logger to use for logging.
 }
 
 // newADSStreamImpl initializes a new adsStreamImpl instance using the given
@@ -143,8 +134,10 @@ func newADSStreamImpl(opts adsStreamOpts) *adsStreamImpl {
 		resourceTypeState: make(map[ResourceType]*resourceTypeState),
 	}
 
-	l := grpclog.Component("xds")
-	s.logger = igrpclog.NewPrefixLogger(l, opts.logPrefix+fmt.Sprintf("[ads-stream %p] ", s))
+	if opts.logger == nil {
+		opts.logger = slog.Default()
+	}
+	s.logger = opts.logger.With("ads-stream", fmt.Sprintf("%p", s))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -157,7 +150,7 @@ func (s *adsStreamImpl) Stop() {
 	s.cancel()
 	s.fc.stop()
 	<-s.runnerDoneCh
-	s.logger.Infof("Shutdown ADS stream")
+	s.logger.Info("Shutdown ADS stream")
 }
 
 // subscribe subscribes to the given resource. It is assumed that multiple
@@ -165,9 +158,7 @@ func (s *adsStreamImpl) Stop() {
 // request is sent out on the underlying stream, for the resource type with the
 // newly subscribed resource.
 func (s *adsStreamImpl) subscribe(typ ResourceType, name string) {
-	if s.logger.V(2) {
-		s.logger.Infof("Subscribing to resource %q of type %q", name, typ.TypeName)
-	}
+	s.logger.Debug("Subscribing to resource", "name", name, "type", typ.TypeName)
 
 	s.mu.Lock()
 	state, ok := s.resourceTypeState[typ]
@@ -197,9 +188,7 @@ func (s *adsStreamImpl) subscribe(typ ResourceType, name string) {
 // resource is stopped if one is active. A discovery request is sent out on the
 // stream for the resource type with the updated set of resource names.
 func (s *adsStreamImpl) unsubscribe(typ ResourceType, name string) {
-	if s.logger.V(2) {
-		s.logger.Infof("Unsubscribing to resource %q of type %q", name, typ.TypeName)
-	}
+	s.logger.Debug("Unsubscribing to resource", "name", name, "type", typ.TypeName)
 
 	s.mu.Lock()
 	state, ok := s.resourceTypeState[typ]
@@ -240,13 +229,11 @@ func (s *adsStreamImpl) runner(ctx context.Context) {
 	runStreamWithBackoff := func() error {
 		stream, err := s.transport.NewStream(ctx, "/envoy.service.discovery.v3.AggregatedDiscoveryService/StreamAggregatedResources")
 		if err != nil {
-			s.logger.Warningf("Failed to create a new ADS streaming RPC: %v", err)
+			s.logger.Warn("Failed to create a new ADS streaming RPC", "error", err)
 			s.onError(err, false)
 			return nil
 		}
-		if s.logger.V(2) {
-			s.logger.Infof("ADS stream created")
-		}
+		s.logger.Debug("ADS stream created")
 
 		s.mu.Lock()
 		s.firstRequest = true
@@ -395,20 +382,16 @@ func (s *adsStreamImpl) sendMessageLocked(stream clients.Stream, names []string,
 
 	msg, err := proto.Marshal(req)
 	if err != nil {
-		s.logger.Warningf("Failed to marshal DiscoveryRequest: %v", err)
+		s.logger.Warn("Failed to marshal DiscoveryRequest", "error", err)
 		return err
 	}
 	if err := stream.Send(msg); err != nil {
-		s.logger.Warningf("Sending ADS request for type %q, resources: %v, version: %q, nonce: %q failed: %v", url, names, version, nonce, err)
+		s.logger.Warn("Sending ADS request failed", "type", url, "resources", names, "version", version, "nonce", nonce, "error", err)
 		return err
 	}
 	s.firstRequest = false
 
-	if s.logger.V(perRPCVerbosityLevel) {
-		s.logger.Infof("ADS request sent: %v", pretty.ToJSON(req))
-	} else if s.logger.V(2) {
-		s.logger.Infof("ADS request sent for type %q, resources: %v, version: %q, nonce: %q", url, names, version, nonce)
-	}
+	s.logger.Debug("ADS request sent", "type", url, "resources", names, "version", version, "nonce", nonce, "raw", pretty.ToJSON(req))
 
 	return nil
 }
@@ -429,16 +412,14 @@ func (s *adsStreamImpl) recv(stream clients.Stream) bool {
 	for {
 		// Wait for ADS stream level flow control to be available.
 		if s.fc.wait() {
-			if s.logger.V(2) {
-				s.logger.Infof("ADS stream stopped while waiting for flow control")
-			}
+			s.logger.Debug("ADS stream stopped while waiting for flow control")
 			return msgReceived
 		}
 
 		resources, url, version, nonce, err := s.recvMessage(stream)
 		if err != nil {
 			s.onError(err, msgReceived)
-			s.logger.Warningf("ADS stream closed: %v", err)
+			s.logger.Warn("ADS stream closed", "error", err)
 			return msgReceived
 		}
 		msgReceived = true
@@ -464,7 +445,7 @@ func (s *adsStreamImpl) recv(stream clients.Stream) bool {
 			// not actually validating what the server sent and therefore don't
 			// know that it's invalid.  But we shouldn't ACK either, because we
 			// don't know that it is valid.
-			s.logger.Warningf("%v", nackErr)
+			s.logger.Warn("Ignoring response with unsupported resource type", "error", nackErr)
 			continue
 		}
 
@@ -479,14 +460,11 @@ func (s *adsStreamImpl) recvMessage(stream clients.Stream) (resources []*anypb.A
 	}
 	var resp v3discoverypb.DiscoveryResponse
 	if err := proto.Unmarshal(r, &resp); err != nil {
-		s.logger.Infof("Failed to unmarshal response to DiscoveryResponse: %v", err)
+		s.logger.Info("Failed to unmarshal response to DiscoveryResponse", "error", err)
 		return nil, "", "", "", fmt.Errorf("unexpected message type %T", r)
 	}
-	if s.logger.V(perRPCVerbosityLevel) {
-		s.logger.Infof("ADS response received: %v", pretty.ToJSON(&resp))
-	} else if s.logger.V(2) {
-		s.logger.Infof("ADS response received for type %q, version %q, nonce %q", resp.GetTypeUrl(), resp.GetVersionInfo(), resp.GetNonce())
-	}
+	s.logger.Debug("ADS response received", "type", resp.GetTypeUrl(), "version", resp.GetVersionInfo(), "nonce", resp.GetNonce(), "raw", pretty.ToJSON(&resp))
+
 	return resp.GetResources(), resp.GetTypeUrl(), resp.GetVersionInfo(), resp.GetNonce(), nil
 }
 
@@ -511,7 +489,7 @@ func (s *adsStreamImpl) onRecv(stream clients.Stream, names []string, url, versi
 	}
 	typeState, ok := s.resourceTypeState[typ]
 	if !ok {
-		s.logger.Warningf("ADS stream received a response for type %q, but no state exists for it", url)
+		s.logger.Warn("ADS stream received a response for a type for which no state exists", "type", url)
 		return
 	}
 
@@ -532,7 +510,7 @@ func (s *adsStreamImpl) onRecv(stream clients.Stream, names []string, url, versi
 	for _, name := range names {
 		rs, ok := typeState.subscribedResources[name]
 		if !ok {
-			s.logger.Warningf("ADS stream received a response for resource %q, but no state exists for it", name)
+			s.logger.Warn("ADS stream received a response for a resource for which no state exists", "resource", name)
 			continue
 		}
 		if ws := rs.State; ws == xdsresource.ResourceWatchStateStarted || ws == xdsresource.ResourceWatchStateRequested {
@@ -547,14 +525,13 @@ func (s *adsStreamImpl) onRecv(stream clients.Stream, names []string, url, versi
 	// Send an ACK or NACK.
 	subscribedResourceNames := resourceNames(typeState.subscribedResources)
 	if nackErr != nil {
-		s.logger.Warningf("Sending NACK for resource type: %q, version: %q, nonce: %q, reason: %v", url, version, nonce, nackErr)
+		s.logger.Warn("Sending NACK", "type", url, "version", version, "nonce", nonce, "error", nackErr)
 		s.sendMessageLocked(stream, subscribedResourceNames, url, previousVersion, nonce, nackErr)
 		return
 	}
 
-	if s.logger.V(2) {
-		s.logger.Infof("Sending ACK for resource type: %q, version: %q, nonce: %q", url, version, nonce)
-	}
+	s.logger.Debug("Sending ACK", "type", url, "version", version, "nonce", nonce)
+
 	s.sendMessageLocked(stream, subscribedResourceNames, url, version, nonce, nil)
 }
 

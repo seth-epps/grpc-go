@@ -20,17 +20,9 @@ package lrsclient
 
 import (
 	"fmt"
-
-	"google.golang.org/grpc/grpclog"
-	internalgrpclog "google.golang.org/grpc/internal/grpclog"
+	"log/slog"
 )
 
-var logger = grpclog.Component("xds")
-
-func prefixLogger(c *LRSClient) *internalgrpclog.PrefixLogger {
-	return internalgrpclog.NewPrefixLogger(logger, clientPrefix(c))
-}
-
-func clientPrefix(c *LRSClient) string {
-	return fmt.Sprintf("[lrs-client %p] ", c)
+func clientPrefix(c *LRSClient) slog.Attr {
+	return slog.String("lrs-client", fmt.Sprintf("%p", c))
 }

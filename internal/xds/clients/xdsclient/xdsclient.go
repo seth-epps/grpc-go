@@ -34,11 +34,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/xds/clients"
 	clientsinternal "google.golang.org/grpc/internal/xds/clients/internal"
 	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
@@ -81,7 +80,7 @@ type XDSClient struct {
 	resourceTypes      map[string]ResourceType      // Registry of resource types, for parsing incoming ADS responses.
 	serializer         *syncutil.CallbackSerializer // Serializer for invoking resource watcher callbacks.
 	serializerClose    func()                       // Function to close the serializer.
-	logger             *grpclog.PrefixLogger
+	logger             *slog.Logger
 	target             string
 	metricsReporter    clients.MetricsReporter
 
@@ -135,6 +134,12 @@ func newClient(config *Config, target string) (*XDSClient, error) {
 		metricsReporter:    config.MetricsReporter,
 	}
 
+	if config.Logger != nil {
+		c.logger = config.Logger.With(clientPrefix(c))
+	} else {
+		c.logger = slog.Default().With(clientPrefix(c))
+	}
+
 	for name, cfg := range config.Authorities {
 		// If server configs are specified in the authorities map, use that.
 		// Else, use the top-level server configs.
@@ -147,7 +152,7 @@ func newClient(config *Config, target string) (*XDSClient, error) {
 			name:             name,
 			serializer:       c.serializer,
 			getChannelForADS: c.getChannelForADS,
-			logPrefix:        clientPrefix(c),
+			logger:           c.logger,
 			target:           target,
 			metricsReporter:  c.metricsReporter,
 		})
@@ -157,11 +162,10 @@ func newClient(config *Config, target string) (*XDSClient, error) {
 		name:             "",
 		serializer:       c.serializer,
 		getChannelForADS: c.getChannelForADS,
-		logPrefix:        clientPrefix(c),
+		logger:           c.logger,
 		target:           target,
 		metricsReporter:  c.metricsReporter,
 	})
-	c.logger = prefixLogger(c)
 
 	return c, nil
 }
@@ -197,7 +201,7 @@ func (c *XDSClient) Close() {
 	c.serializerClose()
 	<-c.serializer.Done()
 
-	c.logger.Infof("Shutdown")
+	c.logger.Info("Shutdown")
 }
 
 // getChannelForADS returns an xdsChannel for the given server configuration.
@@ -217,15 +221,11 @@ func (c *XDSClient) getChannelForADS(serverConfig *ServerConfig, callingAuthorit
 	}
 
 	initLocked := func(s *channelState) {
-		if c.logger.V(2) {
-			c.logger.Infof("Adding authority %q to the set of interested authorities for channel [%p]", callingAuthority.name, s.channel)
-		}
+		c.logger.Debug("Adding authority to the set of interested authorities for channel", "authority", callingAuthority.name, "channel", s.channel)
 		s.interestedAuthorities[callingAuthority] = true
 	}
 	deInitLocked := func(s *channelState) {
-		if c.logger.V(2) {
-			c.logger.Infof("Removing authority %q from the set of interested authorities for channel [%p]", callingAuthority.name, s.channel)
-		}
+		c.logger.Debug("Removing authority from the set of interested authorities for channel", "authority", callingAuthority.name, "channel", s.channel)
 		delete(s.interestedAuthorities, callingAuthority)
 	}
 
@@ -257,22 +257,16 @@ func (c *XDSClient) getOrCreateChannel(serverConfig *ServerConfig, initLocked, d
 	c.channelsMu.Lock()
 	defer c.channelsMu.Unlock()
 
-	if c.logger.V(2) {
-		c.logger.Infof("Received request for a reference to an xdsChannel for server config %q", serverConfig)
-	}
+	c.logger.Debug("Received request for a reference to an xdsChannel", "server", serverConfig)
 
 	// Use an existing channel, if one exists for this server config.
 	if st, ok := c.xdsActiveChannels[*serverConfig]; ok {
-		if c.logger.V(2) {
-			c.logger.Infof("Reusing an existing xdsChannel for server config %q", serverConfig)
-		}
+		c.logger.Debug("Reusing an existing xdsChannel", "server", serverConfig)
 		initLocked(st)
 		return st.channel, c.releaseChannel(serverConfig, st, deInitLocked), nil
 	}
 
-	if c.logger.V(2) {
-		c.logger.Infof("Creating a new xdsChannel for server config %q", serverConfig)
-	}
+	c.logger.Debug("Creating a new xdsChannel", "server", serverConfig)
 
 	// Create a new transport and create a new xdsChannel, and add it to the
 	// map of xdsChannels.
@@ -292,7 +286,7 @@ func (c *XDSClient) getOrCreateChannel(serverConfig *ServerConfig, initLocked, d
 		eventHandler:       state,
 		backoff:            c.backoff,
 		watchExpiryTimeout: c.watchExpiryTimeout,
-		logPrefix:          clientPrefix(c),
+		logger:             c.logger,
 	})
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("xds: failed to create a new channel for server config %v: %v", serverConfig, err)
@@ -318,24 +312,18 @@ func (c *XDSClient) releaseChannel(serverConfig *ServerConfig, state *channelSta
 	return sync.OnceFunc(func() {
 		c.channelsMu.Lock()
 
-		if c.logger.V(2) {
-			c.logger.Infof("Received request to release a reference to an xdsChannel for server config %+v", serverConfig)
-		}
+		c.logger.Debug("Received request to release a reference to an xdsChannel", "server", serverConfig)
 		deInitLocked(state)
 
 		// The channel has active users. Do nothing and return.
 		if len(state.interestedAuthorities) != 0 {
-			if c.logger.V(2) {
-				c.logger.Infof("xdsChannel %p has other active references", state.channel)
-			}
+			c.logger.Debug("xdsChannel has other active references", "channel", state.channel)
 			c.channelsMu.Unlock()
 			return
 		}
 
 		delete(c.xdsActiveChannels, *serverConfig)
-		if c.logger.V(2) {
-			c.logger.Infof("Closing xdsChannel [%p] for server config %s", state.channel, serverConfig)
-		}
+		c.logger.Debug("Closing xdsChannel", "channel", state.channel, "server", serverConfig)
 		channelToClose := state.channel
 		c.channelsMu.Unlock()
 

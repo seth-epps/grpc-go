@@ -25,10 +25,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
-
-	igrpclog "google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/xds/clients"
 	clientsinternal "google.golang.org/grpc/internal/xds/clients/internal"
 	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
@@ -48,7 +47,7 @@ type LRSClient struct {
 	transportBuilder clients.TransportBuilder
 	node             clients.Node
 	backoff          func(int) time.Duration // Backoff for LRS stream failures.
-	logger           *igrpclog.PrefixLogger
+	logger           *slog.Logger
 
 	// The LRSClient owns a bunch of streams to individual LRS servers.
 	//
@@ -71,7 +70,11 @@ func New(config Config) (*LRSClient, error) {
 		lrsStreams:       make(map[clients.ServerIdentifier]*streamImpl),
 		lrsRefs:          make(map[clients.ServerIdentifier]int),
 	}
-	c.logger = prefixLogger(c)
+	if config.Logger != nil {
+		c.logger = config.Logger.With(clientPrefix(c))
+	} else {
+		c.logger = slog.Default().With(clientPrefix(c))
+	}
 	return c, nil
 }
 
@@ -96,22 +99,16 @@ func (c *LRSClient) getOrCreateLRSStream(serverIdentifier clients.ServerIdentifi
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.logger.V(2) {
-		c.logger.Infof("Received request for a reference to an lrs stream for server identifier %q", serverIdentifier)
-	}
+	c.logger.Debug("Received request for a reference to an lrs stream", "server", serverIdentifier)
 
 	// Use an existing stream, if one exists for this server identifier.
 	if s, ok := c.lrsStreams[serverIdentifier]; ok {
-		if c.logger.V(2) {
-			c.logger.Infof("Reusing an existing lrs stream for server identifier %q", serverIdentifier)
-		}
+		c.logger.Debug("Reusing an existing lrs stream", "server", serverIdentifier)
 		c.lrsRefs[serverIdentifier]++
 		return s, nil
 	}
 
-	if c.logger.V(2) {
-		c.logger.Infof("Creating a new lrs stream for server identifier %q", serverIdentifier)
-	}
+	c.logger.Debug("Creating a new lrs stream", "server", serverIdentifier)
 
 	// Create a new transport and create a new lrs stream, and add it to the
 	// map of lrs streams.
@@ -126,7 +123,7 @@ func (c *LRSClient) getOrCreateLRSStream(serverIdentifier clients.ServerIdentifi
 		transport: tr,
 		backoff:   c.backoff,
 		nodeProto: nodeProto,
-		logPrefix: clientPrefix(c),
+		logger:    c.logger,
 	})
 
 	// Register a stop function that decrements the reference count, stops
@@ -139,7 +136,7 @@ func (c *LRSClient) getOrCreateLRSStream(serverIdentifier clients.ServerIdentifi
 		defer c.mu.Unlock()
 
 		if r, ok := c.lrsRefs[serverIdentifier]; !ok || r == 0 {
-			c.logger.Errorf("Attempting to stop already stopped StreamImpl")
+			c.logger.Error("Attempting to stop already stopped StreamImpl")
 			return
 		}
 		c.lrsRefs[serverIdentifier]--
@@ -152,15 +149,15 @@ func (c *LRSClient) getOrCreateLRSStream(serverIdentifier clients.ServerIdentifi
 		select {
 		case err := <-lrs.finalSendDone:
 			if err != nil {
-				c.logger.Warningf("Final send attempt failed: %v", err)
+				c.logger.Warn("Final send attempt failed", "error", err)
 			}
 		case <-ctx.Done():
-			c.logger.Warningf("Context canceled before finishing the final send attempt: %v", err)
+			c.logger.Warn("Context canceled before finishing the final send attempt")
 		}
 
 		lrs.cancelStream()
 		lrs.cancelStream = nil
-		lrs.logger.Infof("Stopping LRS stream")
+		c.logger.Info("Stopping LRS stream")
 		<-lrs.doneCh
 
 		delete(c.lrsStreams, serverIdentifier)

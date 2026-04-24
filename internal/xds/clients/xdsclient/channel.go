@@ -21,12 +21,11 @@ package xdsclient
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal/envconfig"
-	igrpclog "google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/xds/clients"
 	"google.golang.org/grpc/internal/xds/clients/internal"
 	"google.golang.org/grpc/internal/xds/clients/internal/backoff"
@@ -70,7 +69,7 @@ type xdsChannelOpts struct {
 	eventHandler       xdsChannelEventHandler  // Callbacks for ADS stream events.
 	backoff            func(int) time.Duration // Backoff function to use for stream retries. Defaults to exponential backoff, if unset.
 	watchExpiryTimeout time.Duration           // Timeout for ADS resource watch expiry.
-	logPrefix          string                  // Prefix to use for logging.
+	logger             *slog.Logger            // Logger to use for logging.
 }
 
 // newXDSChannel creates a new xdsChannel instance with the provided options.
@@ -96,9 +95,10 @@ func newXDSChannel(opts xdsChannelOpts) (*xdsChannel, error) {
 		closed:       syncutil.NewEvent(),
 	}
 
-	l := grpclog.Component("xds")
-	logPrefix := opts.logPrefix + fmt.Sprintf("[xds-channel %p] ", xc)
-	xc.logger = igrpclog.NewPrefixLogger(l, logPrefix)
+	if opts.logger == nil {
+		opts.logger = slog.Default()
+	}
+	xc.logger = opts.logger.With("xds-channel", fmt.Sprintf("%p", xc))
 
 	if opts.backoff == nil {
 		opts.backoff = backoff.DefaultExponential.Backoff
@@ -111,11 +111,9 @@ func newXDSChannel(opts xdsChannelOpts) (*xdsChannel, error) {
 		backoff:            opts.backoff,
 		nodeProto:          np,
 		watchExpiryTimeout: opts.watchExpiryTimeout,
-		logPrefix:          logPrefix,
+		logger:             xc.logger,
 	})
-	if xc.logger.V(2) {
-		xc.logger.Infof("xdsChannel is created for ServerConfig %v", opts.serverConfig)
-	}
+	xc.logger.Debug("xdsChannel is created", "server", opts.serverConfig)
 	return xc, nil
 }
 
@@ -132,7 +130,7 @@ type xdsChannel struct {
 	serverConfig *ServerConfig          // Configuration of the server to connect to.
 	clientConfig *Config                // Complete xDS client configuration, used to decode resources.
 	eventHandler xdsChannelEventHandler // Callbacks for ADS stream events.
-	logger       *igrpclog.PrefixLogger // Logger to use for logging.
+	logger       *slog.Logger           // Logger to use for logging.
 	closed       *syncutil.Event        // Fired when the channel is closed.
 }
 
@@ -140,16 +138,14 @@ func (xc *xdsChannel) close() {
 	xc.closed.Fire()
 	xc.ads.Stop()
 	xc.transport.Close()
-	xc.logger.Infof("Shutdown")
+	xc.logger.Info("Shutdown")
 }
 
 // subscribe adds a subscription for the given resource name of the given
 // resource type on the ADS stream.
 func (xc *xdsChannel) subscribe(typ ResourceType, name string) {
 	if xc.closed.HasFired() {
-		if xc.logger.V(2) {
-			xc.logger.Infof("Attempt to subscribe to an xDS resource of type %s and name %q on a closed channel", typ.TypeName, name)
-		}
+		xc.logger.Debug("Attempt to subscribe to an xDS resource on a closed channel", "type", typ.TypeName, "name", name)
 		return
 	}
 	xc.ads.subscribe(typ, name)
@@ -159,9 +155,7 @@ func (xc *xdsChannel) subscribe(typ ResourceType, name string) {
 // resource type from the ADS stream.
 func (xc *xdsChannel) unsubscribe(typ ResourceType, name string) {
 	if xc.closed.HasFired() {
-		if xc.logger.V(2) {
-			xc.logger.Infof("Attempt to unsubscribe to an xDS resource of type %s and name %q on a closed channel", typ.TypeName, name)
-		}
+		xc.logger.Debug("Attempt to unsubscribe to an xDS resource on a closed channel", "type", typ.TypeName, "name", name)
 		return
 	}
 	xc.ads.unsubscribe(typ, name)
@@ -174,9 +168,7 @@ func (xc *xdsChannel) unsubscribe(typ ResourceType, name string) {
 // propagates the update to the xDS client.
 func (xc *xdsChannel) onStreamError(err error) {
 	if xc.closed.HasFired() {
-		if xc.logger.V(2) {
-			xc.logger.Infof("Received ADS stream error on a closed xdsChannel: %v", err)
-		}
+		xc.logger.Debug("Received ADS stream error on a closed xdsChannel", "error", err)
 		return
 	}
 	xc.eventHandler.adsStreamFailure(err)
@@ -186,9 +178,7 @@ func (xc *xdsChannel) onStreamError(err error) {
 // propagates the update to the xDS client.
 func (xc *xdsChannel) onWatchExpiry(typ ResourceType, name string) {
 	if xc.closed.HasFired() {
-		if xc.logger.V(2) {
-			xc.logger.Infof("Received ADS resource watch expiry for resource %q on a closed xdsChannel", name)
-		}
+		xc.logger.Debug("Received ADS resource watch expiry on a closed xdsChannel", "name", name)
 		return
 	}
 	xc.eventHandler.adsResourceDoesNotExist(typ, name)
@@ -202,9 +192,7 @@ func (xc *xdsChannel) onWatchExpiry(typ ResourceType, name string) {
 // encountered during decoding.
 func (xc *xdsChannel) onResponse(resp response, onDone func()) ([]string, error) {
 	if xc.closed.HasFired() {
-		if xc.logger.V(2) {
-			xc.logger.Infof("Received an update from the ADS stream on closed ADS stream")
-		}
+		xc.logger.Debug("Received an update from the ADS stream on closed ADS stream")
 		return nil, errors.New("xdsChannel is closed")
 	}
 
@@ -268,7 +256,7 @@ func (xc *xdsChannel) decodeResponse(rType *ResourceType, resp response) (map[st
 		// deserialization fails.
 		name := ""
 		if result == nil && err == nil {
-			xc.logger.Errorf("Decode() returned nil result and nil error for resource: %v", r)
+			xc.logger.Error("Decode() returned nil result and nil error", "resource", r)
 			continue
 		}
 		if result != nil {
